@@ -480,6 +480,7 @@ ranges: {
 - `deferDpiSlotCountUiUntilAck`
 - `warnOnDisableOnboardMemoryMode`
 - `confirmEnableOnboardMemoryOnConnect`
+- `emergencyDisableOnboardMemoryHotkey`
 
 说明：
 
@@ -723,6 +724,7 @@ profile/ranges 必备决策：
 - `features.hasOnboardMemoryMode`
 - `features.warnOnDisableOnboardMemoryMode`
 - `features.confirmEnableOnboardMemoryOnConnect`
+- `features.emergencyDisableOnboardMemoryHotkey`
 - `ui.onboardMemoryDisableConfirmText`
 - `ui.onboardMemoryEnableConfirmText`
 
@@ -730,7 +732,8 @@ profile/ranges 必备决策：
 
 - 不要在连接后默认强制写入 `onboardMemoryMode: true`
 - 若启用了 `confirmEnableOnboardMemoryOnConnect`，连接后 `app.js` 只在明确读到 `onboardMemoryMode === false` 时弹出浏览器原生确认；点击“确定”表示写入一次 `onboardMemoryMode: true` 并进入，点击“取消”表示不启用板载内存模式并继续进入；写入失败或读到未知值也都继续进入
-- 连接确认文案应说明：若出现按键等异常，关闭板载内存模式即可；同时避免堆叠长型号列表，确保 Chrome 原生确认框不被裁切
+- 连接确认文案应说明：若出现按键等异常，关闭板载内存模式即可；若启用了紧急关闭快捷键，还应提示 `Ctrl+Alt+Shift+O`；同时避免堆叠长型号列表，确保 Chrome 原生确认框不被裁切
+- `emergencyDisableOnboardMemoryHotkey` 仅用于网页确认流程开启板载内存模式后的紧急关闭；快捷键应限制为 Logitech、同一 HID 设备短时标记、且不新增 DOM/CSS/失败 alert
 - 若启用了 `warnOnDisableOnboardMemoryMode`，关闭时会弹确认
 
 ## 9. 什么时候不用改 `app.js` / `refactor.ui.js`
