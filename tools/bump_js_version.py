@@ -97,10 +97,12 @@ def choose_target_version(current_version: str, explicit_version: str, non_inter
 
 
 def collect_html_files(root_dir: Path) -> list[Path]:
+    # Local research/reference trees that must never be touched by the version bump.
+    IGNORED_DIRS = {".git", "node_modules", "dist", "openrazer", "razer官方驱动"}
     html_files: list[Path] = []
     for path in root_dir.rglob("*.html"):
         parts = set(path.parts)
-        if ".git" in parts or "node_modules" in parts or "dist" in parts:
+        if parts & IGNORED_DIRS:
             continue
         html_files.append(path)
     return sorted(html_files)

@@ -302,6 +302,59 @@ const MODULES = [
   },
 ];
 
+// Keywords used by --rescan mode to locate SE/mouse protocol modules in bundles
+// whose webpack module ids differ from the curated MODULES list.
+const RESCAN_KEYWORDS = [
+  { weight: 3, terms: ["00de", "00df"] }, // Viper V3 Pro SE PIDs (hex in strings)
+  { weight: 2, terms: ["viper"] },
+  { weight: 1, terms: ["proximity", "proximitysensor"] },
+  { weight: 1, terms: ["calibration"] },
+  { weight: 1, terms: ["smarttracking", "smart tracking"] },
+  { weight: 1, terms: ["liftoff", "lift off", "liftdistance", "landingdistance"] },
+  { weight: 1, terms: ["lowbatterythreshold", "battery critical", "batterythreshold"] },
+  { weight: 1, terms: ["charge limiter", "chargelimiter", "battery charge"] },
+  { weight: 1, terms: ["time to dim", "timetodim"] },
+  { weight: 1, terms: ["auto sleep", "autosleep", "sleep mode"] },
+  { weight: 1, terms: ["power mode", "powermode"] },
+  { weight: 1, terms: ["game mode", "gamemode"] },
+  { weight: 1, terms: ["hyperpolling"] },
+  { weight: 1, terms: ["pollingperiod", "polling rate"] },
+  { weight: 1, terms: ["obm", "onboard memory"] },
+  { weight: 1, terms: ["hypershift"] },
+  { weight: 1, terms: ["dynamic sensitivity", "dynamicsensitivity"] },
+];
+
+function rescanModules(source, spans) {
+  const scored = [];
+  for (const span of spans) {
+    const body = source.slice(span.bodyStart, span.bodyEndExclusive);
+    if (body.length > 2_000_000) continue; // skip suspiciously huge spans
+    const lower = body.toLowerCase();
+    const hits = [];
+    let score = 0;
+    for (const group of RESCAN_KEYWORDS) {
+      const matched = group.terms.filter((t) => lower.includes(t.toLowerCase()));
+      if (matched.length) {
+        score += group.weight;
+        hits.push(...matched);
+      }
+    }
+    if (score === 0) continue;
+    const exportMatch = body.match(/n\.d\(t,\{([^}]*)\}\)/);
+    scored.push({
+      id: span.id,
+      score,
+      hits: [...new Set(hits)].slice(0, 12),
+      size: body.length,
+      exportsPreview: exportMatch ? exportMatch[1].replace(/\s+/g, " ").trim().slice(0, 200) : "",
+      dependencies: getDependencies(body),
+      headerStart: span.headerStart,
+    });
+  }
+  scored.sort((a, b) => b.score - a.score || b.size - a.size);
+  return scored;
+}
+
 function fail(message) {
   throw new Error(message);
 }
@@ -341,27 +394,52 @@ function findOfficialBundle() {
   fail("Could not locate the official Synapse Web Beta main bundle.");
 }
 
-function collectModuleSpans(source) {
-  const headerRegex = /(\d+)\(e,t,n\)\{/g;
-  const markers = [];
-  let match;
+// Module header patterns covering common webpack / CDP-pretty-printed shapes:
+//   1207:function(e,t,n){     1207: function (e, t, n) {
+//   1207:(e,t,n)=>{            1207: (e, t, n) => {
+//   1207:(e,t,n){              1207(e,t,n){
+const MODULE_HEADER_PATTERNS = [
+  /(\d+)\s*:\s*function\s*\(\s*e\s*,\s*t\s*,\s*n\s*\)\s*\{/g,
+  /(\d+)\s*:\s*\(\s*e\s*,\s*t\s*,\s*n\s*\)\s*=>\s*\{/g,
+  /(\d+)\s*:\s*\(\s*e\s*,\s*t\s*,\s*n\s*\)\s*\{/g,
+  /(\d+)\s*\(\s*e\s*,\s*t\s*,\s*n\s*\)\s*\{/g,
+];
 
-  while ((match = headerRegex.exec(source))) {
-    markers.push({
-      id: match[1],
-      headerStart: match.index,
-      bodyStart: match.index + match[0].length,
-      header: match[0],
-    });
+function collectModuleSpans(source) {
+  const byIndex = new Map();
+  for (const pattern of MODULE_HEADER_PATTERNS) {
+    let match;
+    pattern.lastIndex = 0;
+    while ((match = pattern.exec(source))) {
+      const existing = byIndex.get(match.index);
+      // Keep the longest header at the same offset (most specific shape).
+      if (!existing || match[0].length > existing.header.length) {
+        byIndex.set(match.index, {
+          id: match[1],
+          headerStart: match.index,
+          bodyStart: match.index + match[0].length,
+          header: match[0],
+        });
+      }
+    }
   }
+
+  const markers = [...byIndex.values()].sort((a, b) => a.headerStart - b.headerStart);
 
   if (!markers.length) {
     fail("No webpack module headers were found in the bundle.");
   }
 
-  const tailStart = source.indexOf("},t={}", markers[markers.length - 1].headerStart);
+  // Webpack runtime tail marker: `},t={}` (with optional spaces). Fall back to
+  // the end of file when the runtime shape differs (CDP pretty dumps etc.).
+  let tailStart = -1;
+  for (const candidate of ["},t={}", "},t = {}", "},t={", "}, t = {"]) {
+    const idx = source.indexOf(candidate, markers[markers.length - 1].headerStart);
+    if (idx !== -1) { tailStart = idx; break; }
+  }
   if (tailStart === -1) {
-    fail("Could not locate the webpack module table tail marker.");
+    console.warn("[warn] webpack tail marker `},t={}` not found; using EOF as last-module bound.");
+    tailStart = source.length;
   }
 
   return markers.map((marker, index) => {
@@ -456,12 +534,97 @@ function renderReadme(bundlePath, manifest) {
   return lines.join("\n");
 }
 
+function parseArgs(argv) {
+  const args = { bundlePath: null, rescan: false, strict: false };
+  for (const raw of argv) {
+    if (raw === "--rescan") args.rescan = true;
+    else if (raw === "--strict") args.strict = true;
+    else if (raw.startsWith("--bundle=")) args.bundlePath = raw.slice("--bundle=".length);
+    else if (raw === "--bundle") {
+      const idx = argv.indexOf(raw);
+      if (idx + 1 < argv.length) args.bundlePath = argv[idx + 1];
+    } else if (!raw.startsWith("-")) {
+      args.bundlePath = raw; // positional shorthand
+    }
+  }
+  return args;
+}
+
+function writeRescanOutput(outputRoot, bundleLabel, scored, source, spans) {
+  const spanMap = new Map(spans.map((span) => [span.id, span]));
+  const rescanDir = path.join(outputRoot, "rescan");
+  fs.mkdirSync(rescanDir, { recursive: true });
+
+  const top = scored.slice(0, 80);
+  const report = {
+    bundle: bundleLabel,
+    generatedBy: "node tools/extract_razer_mouse_bundle.js --rescan",
+    totalScored: scored.length,
+    topModules: top.map((entry) => ({
+      id: entry.id,
+      score: entry.score,
+      hits: entry.hits,
+      size: entry.size,
+      exportsPreview: entry.exportsPreview,
+      dependencies: entry.dependencies,
+    })),
+  };
+  fs.writeFileSync(
+    path.join(rescanDir, "rescan_report.json"),
+    `${JSON.stringify(report, null, 2)}\n`,
+    "utf8",
+  );
+
+  for (const entry of top) {
+    const span = spanMap.get(entry.id);
+    if (!span) continue;
+    const rawBody = source.slice(span.bodyStart, span.bodyEndExclusive).trim();
+    const body = rawBody.endsWith("}") ? rawBody.slice(0, -1).trimEnd() : rawBody;
+    const file = path.join(rescanDir, `${entry.id}_${entry.hits[0] || "match"}.js`);
+    ensureInside(outputRoot, file);
+    fs.writeFileSync(
+      file,
+      [
+        "/**",
+        " * RESCAN: matched by keywords, module id may be bundle-version specific.",
+        ` * Source bundle: ${bundleLabel}`,
+        ` * Webpack module id: ${entry.id}`,
+        ` * Score: ${entry.score}  Hits: ${entry.hits.join(", ")}`,
+        ` * Exports: ${entry.exportsPreview || "(none previewed)"}`,
+        ` * Local webpack deps: ${entry.dependencies.join(", ") || "none"}`,
+        " */",
+        `const webpackModule_${entry.id} = function (e, t, n) {`,
+        body,
+        "};",
+        "",
+        `module.exports = webpackModule_${entry.id};`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  }
+
+  console.log(`Rescan: ${scored.length} modules matched; wrote top ${top.length} to ${rescanDir}`);
+  console.log("Top matches by score:");
+  for (const entry of top.slice(0, 20)) {
+    console.log(
+      `  #${entry.id} score=${entry.score} hits=[${entry.hits.join(",")}] size=${entry.size} exports={${entry.exportsPreview.slice(0, 80)}}`,
+    );
+  }
+}
+
 function main() {
-  const bundlePath = findOfficialBundle();
+  const args = parseArgs(process.argv.slice(2));
+  const bundlePath = args.bundlePath ? path.resolve(ROOT_DIR, args.bundlePath) : findOfficialBundle();
+  if (!fs.existsSync(bundlePath)) {
+    fail(`Bundle not found: ${bundlePath}`);
+  }
   const bundleDir = path.dirname(bundlePath);
-  const officialRoot = path.dirname(bundleDir);
+  const officialRoot = args.bundlePath ? ROOT_DIR : path.dirname(bundleDir);
   const outputRoot = path.join(officialRoot, OUTPUT_DIR_NAME);
-  const bundleLabel = `${path.basename(bundleDir)}/${path.basename(bundlePath)}`;
+  const bundleLabel = args.bundlePath
+    ? bundlePath
+    : `${path.basename(bundleDir)}/${path.basename(bundlePath)}`;
 
   ensureInside(ROOT_DIR, outputRoot);
   if (path.basename(outputRoot) !== OUTPUT_DIR_NAME) {
@@ -472,12 +635,31 @@ function main() {
   const spans = collectModuleSpans(source);
   const spanMap = new Map(spans.map((span) => [span.id, span]));
   const missing = MODULES.filter((entry) => !spanMap.has(entry.id)).map((entry) => entry.id);
-  if (missing.length) {
-    fail(`Missing module ids in bundle: ${missing.join(", ")}`);
+
+  if (missing.length && !args.rescan && !args.strict) {
+    console.warn(
+      `[warn] ${missing.length} curated module ids missing in this bundle: ${missing.join(", ")}\n` +
+        `[warn] The bundle version differs from the one the MODULES list was built for.\n` +
+        `[warn] Falling back to keyword rescan (--rescan). Use --strict to fail instead.`,
+    );
+    args.rescan = true;
   }
 
   fs.rmSync(outputRoot, { recursive: true, force: true });
   fs.mkdirSync(outputRoot, { recursive: true });
+
+  if (args.rescan) {
+    const scored = rescanModules(source, spans);
+    if (!scored.length) {
+      fail("Rescan found no modules matching the SE/mouse keywords.");
+    }
+    writeRescanOutput(outputRoot, bundleLabel, scored, source, spans);
+    return;
+  }
+
+  if (missing.length) {
+    fail(`Missing module ids in bundle: ${missing.join(", ")} (use --rescan for keyword mode)`);
+  }
 
   for (const category of Object.keys(CATEGORY_DESCRIPTIONS)) {
     fs.mkdirSync(path.join(outputRoot, category), { recursive: true });

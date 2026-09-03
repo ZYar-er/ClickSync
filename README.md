@@ -38,7 +38,7 @@ Click Sync 是一个基于 WebHID 的多品牌鼠标网页驱动控制台，目�
 
 目前支持的品牌型号包括：
 
-- 雷蛇（毒蝰 V3 Pro、毒蝰 V4 Pro。请退出雷云驱动使用）
+- 雷蛇（毒蝰 V3 Pro、毒蝰 V3 Pro SE、毒蝰 V4 Pro。请退出雷云驱动使用）
 - 罗技（GPW3、GPW4 朱雀、GPW4 鹰眼、小狗、GPW5 雪豹）
 - 雷柏（雷柏二代 54L15 的 3950 系列鼠标）
 - ATK（54L15 的 3950 系列鼠标）
@@ -57,7 +57,7 @@ Click Sync 是一个基于 WebHID 的多品牌鼠标网页驱动控制台，目�
 
 | 设备类型 | 主要识别条件 |
 |---|---|
-| Razer(雷蛇) | `vendorId=0x1532` 且 `productId` 在支持列表内（`0x00C0`-`0x00C5`） |
+| Razer(雷蛇) | `vendorId=0x1532` 且 `productId` 在支持列表内（`0x00B3`、`0x00B6`-`0x00C5`、`0x00DE`/`0x00DF`、`0x00E5`/`0x00E6`） |
 | Logitech(罗技) | `vendorId=0x046D` 且存在 `usagePage=0xFF00`（`usage=0x01/0x02` 或 vendor collection） |
 | Rapoo(雷柏) | `vendorId=0x24AE` 且存在 `usagePage=0xFF00`，`usage=14/15` |
 | ATK | `vendorId in {0x373B,0x3710}` 且存在 `usagePage=0xFF02`,`usage=0x0002` |
@@ -236,7 +236,7 @@ Supported brands in the current code: `Razer`, `Logitech`, `Rapoo`, `ATK`, `Ninj
 
 Currently supported brands and models include:
 
-- Razer (Viper V3 Pro, Viper V4 Pro. Please exit Razer Synapse)
+- Razer (Viper V3 Pro, Viper V3 Pro SE, Viper V4 Pro. Please exit Razer Synapse)
 - Logitech (PRO X SUPERLIGHT 2, PRO 2 LIGHTSPEED, PRO X SUPERLIGHT 2 DEX, PRO X SUPERLIGHT 2C, PRO X2 SUPERSTRIKE)
 - Rapoo (2nd-gen 54L15 3950-series mice)
 - ATK (54L15 3950-series mice)
@@ -255,7 +255,7 @@ Device recognition logic is located in `src/core/device_runtime.js`, matched thr
 
 | Device Type | Main Recognition Criteria |
 |---|---|
-| Razer | `vendorId=0x1532` and `productId` in supported list (`0x00C0`-`0x00C5`) |
+| Razer | `vendorId=0x1532` and `productId` in supported list (`0x00B3`, `0x00B6`-`0x00C5`, `0x00DE`/`0x00DF`, `0x00E5`/`0x00E6`) |
 | Logitech | `vendorId=0x046D` and exists `usagePage=0xFF00` (`usage=0x01/0x02` or vendor collection) |
 | Rapoo | `vendorId=0x24AE` and exists `usagePage=0xFF00`, `usage=14/15` |
 | ATK | `vendorId in {0x373B,0x3710}` and exists `usagePage=0xFF02`, `usage=0x0002` |

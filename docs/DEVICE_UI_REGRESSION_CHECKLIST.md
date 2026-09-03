@@ -289,6 +289,15 @@
   - 应显示 `smartTrackingComposite`
   - 应显示 `lowPowerThresholdPercent`
   - 应显示 `hyperpollingIndicator`
+- `Viper V3 Pro SE (Wired/Wireless)`（0x00DE/0x00DF，协议已抓包+OpenRazer PR #2886 验证）：
+  - 应显示 `sleepSeconds`
+  - 应显示 `sensorAngle`
+  - 应显示 `dynamicSensitivityComposite`
+  - 应显示 `smartTrackingComposite`
+  - 应显示 `lowPowerThresholdPercent`
+  - **不应显示 `hyperpollingIndicator`**（SE 不支持 HyperPolling，回报率限 125/500/1000Hz）
+  - DPI 上限 35000（`cfg.capabilities.maxDpi === 35000`）
+  - 高级面板密度 `compact`
 ### 4.7 CRDRAKO
 
 基础预期：

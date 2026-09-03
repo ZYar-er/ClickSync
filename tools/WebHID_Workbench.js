@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WebHID Workbench
 // @namespace    webhid-workbench-cn
-// @version      2.2.3
+// @version      2.3.0
 // @description  WebHID 工作台
 // @match        https://hub.rapoo.cn/*
 // @match        https://hub.atk.pro/*
@@ -10,6 +10,10 @@
 // @match        https://hub.miracletek.net/*
 // @match        https://www.chaos.vin/*
 // @match        https://chaos.vin/*
+// @match        https://razer.com/*
+// @match        https://*.razer.com/*
+// @match        http://localhost:8000/*
+// @match        http://127.0.0.1:8000/*
 // @run-at       document-start
 // @inject-into  page
 // @grant        unsafeWindow
@@ -63,6 +67,52 @@
             name: "配置读取请求(CFG1)",
             match: (id, data) => data.length >= 8 && data[0] === 0x01 && data[4] === 0x43 && data[5] === 0x46,
             decode: (id, data) => ({ 类型: "命令:读取配置", 标记: "CFG1" })
+        },
+        {
+            // Razer 90-byte legacy feature-report frame (Viper V3 family / Legacy V3 transport).
+            // Validates XOR checksum over bytes[2..87]; decodes both known layouts:
+            //   Layout A (OpenRazer/ClickSync): dataSize BE @[5-6], class @[7], cmd @[8]
+            //   Layout B (Synapse Protocol 2.5): dataSize @[5],    class @[6], cmd @[7]
+            name: "Razer_90字节帧",
+            match: (id, data) => {
+                if (!data || data.length !== 90) return false;
+                if (![0x00, 0x01, 0x02, 0x03, 0x04, 0x05].includes(data[0])) return false;
+                let xor = 0;
+                for (let i = 2; i < 88; i++) xor ^= data[i];
+                return xor === data[88] && data[89] === 0x00;
+            },
+            decode: (id, data) => {
+                const CLASS = {
+                    0x00: "General", 0x02: "Button", 0x04: "DPI",
+                    0x07: "Battery/Power", 0x0b: "Sensor/Proximity", 0x0d: "Thermal",
+                };
+                const STATUS = { 0x00: "req", 0x01: "busy", 0x02: "ok", 0x03: "err", 0x04: "timeout", 0x05: "unsupported" };
+                const sizeA = (data[5] << 8) | data[6];
+                const sizeB = data[5];
+                let layout, size, cls, cmd;
+                if (sizeA > 0 && sizeA <= 0x50 && (sizeB === 0 || sizeB > 0x50)) {
+                    layout = "A(OpenRazer)"; size = sizeA; cls = data[7]; cmd = data[8];
+                } else if (sizeB > 0 && sizeB <= 0x50 && (sizeA === 0 || sizeA > 0x50)) {
+                    layout = "B(Synapse2.5)"; size = sizeB; cls = data[6]; cmd = data[7];
+                } else if (sizeA > 0 && sizeA <= 0x50) {
+                    layout = "A(OpenRazer)?"; size = sizeA; cls = data[7]; cmd = data[8];
+                } else {
+                    layout = "B(Synapse2.5)?"; size = sizeB; cls = data[6]; cmd = data[7];
+                }
+                const args = Array.from(data.slice(9, 9 + Math.min(size, 12)))
+                    .map((b) => b.toString(16).padStart(2, "0")).join(" ");
+                return {
+                    类型: "Razer帧",
+                    布局: layout,
+                    状态: STATUS[data[0]] || data[0],
+                    tx: `0x${data[1].toString(16).padStart(2, "0")}`,
+                    dataSize: size,
+                    class: `0x${cls.toString(16).padStart(2, "0")} ${CLASS[cls] || ""}`.trim(),
+                    cmd: `0x${cmd.toString(16).padStart(2, "0")}`,
+                    方向: data[0] === 0x00 ? "请求" : "响应",
+                    args前12: args,
+                };
+            }
         }
     ];
 
