@@ -3211,6 +3211,7 @@ async function enterAppWithLiquidTransition(origin = null) {
   const topBatteryWrap = $("#topBatteryWrap");
   const topBatteryPercent = $("#topBatteryPercent");
   const topBatteryFill = $("#topBatteryFill");
+  const topBatteryCharging = $("#topBatteryCharging");
 
 
   initXSelects();
@@ -3234,6 +3235,7 @@ async function enterAppWithLiquidTransition(origin = null) {
   let __batteryKnownForCurrentSession = false;
   let __batteryPrimePendingForCurrentSession = false;
   let __pendingHandshakeBatterySnapshot = null;
+  let __currentSessionCharging = false;
 
   function parseBatteryPercent(rawBatteryText) {
     const txt = String(rawBatteryText ?? "").trim();
@@ -3262,6 +3264,7 @@ async function enterAppWithLiquidTransition(origin = null) {
 
   function __rememberBatterySnapshot(snapshot) {
     const percent = normalizeBatteryPercentValue(snapshot?.batteryPercent);
+    __currentSessionCharging = !!snapshot?.batteryIsCharging;
     if (percent == null) return "";
     return __setCurrentSessionBatteryText(`${percent}%`);
   }
@@ -3270,6 +3273,7 @@ async function enterAppWithLiquidTransition(origin = null) {
     __batteryKnownForCurrentSession = false;
     __batteryPrimePendingForCurrentSession = false;
     __pendingHandshakeBatterySnapshot = null;
+    __currentSessionCharging = false;
     if (clearText) currentBatteryText = "";
   }
 
@@ -3309,6 +3313,11 @@ async function enterAppWithLiquidTransition(origin = null) {
     }
     if (topBatteryFill) {
       topBatteryFill.style.width = batteryPercent == null ? "0%" : `${batteryPercent}%`;
+    }
+    if (topBatteryCharging) {
+      // Charging state comes from the protocol snapshot (batteryIsCharging,
+      // e.g. Razer 0x07/0x84 Get Device Charging Status).
+      topBatteryCharging.hidden = !(connected && __currentSessionCharging);
     }
     if (topBatteryWrap) {
       topBatteryWrap.classList.toggle("is-mid", batteryPercent != null && batteryPercent > 20 && batteryPercent <= 60);
@@ -5385,8 +5394,10 @@ function lockEl(el) {
     let lift = __normalizeSmartTrackingDistance(liftValue, 2, 26, DEFAULT_SMART_TRACKING_LIFT_DISTANCE);
     let landing = __normalizeSmartTrackingDistance(landingValue, 1, 25, DEFAULT_SMART_TRACKING_LANDING_DISTANCE);
     if (landing >= lift) {
-      lift = Math.min(26, landing + 1);
-      if (landing >= lift) landing = Math.max(1, lift - 1);
+      // 联动（对齐官方 App maxLandingDistance = liftOffDistance - 1）：
+      // 抬起 > 落地，差值最小为 1；抬起被拉低时落地跟随压到 抬起-1。
+      landing = Math.max(1, lift - 1);
+      if (landing >= lift) lift = Math.min(26, landing + 1);
     }
     return { lift, landing };
   }
@@ -5505,11 +5516,24 @@ function lockEl(el) {
     }
     if (landingInput) {
       landingInput.min = String(landingCfg.min ?? 1);
-      landingInput.max = String(landingCfg.max ?? 25);
       landingInput.step = String(landingCfg.step ?? 1);
     }
 
     if (liftInput && landingInput) {
+      // 联动：落地距离上限跟随抬起距离（落地 <= 抬起 - 1，差值最小为 1）。
+      // 与官方 App maxLandingDistance = liftOffDistance - 1 一致。
+      const liftNow = __normalizeSmartTrackingDistance(
+        liftInput.value,
+        liftCfg.min ?? 2,
+        liftCfg.max ?? 26,
+        DEFAULT_SMART_TRACKING_LIFT_DISTANCE
+      );
+      const landingMax = Math.max(
+        landingCfg.min ?? 1,
+        Math.min(landingCfg.max ?? 25, liftNow - 1)
+      );
+      landingInput.max = String(landingMax);
+
       const pair = __normalizeSmartTrackingPair(liftInput.value, landingInput.value);
       if (String(liftInput.value) !== String(pair.lift)) liftInput.value = String(pair.lift);
       if (String(landingInput.value) !== String(pair.landing)) landingInput.value = String(pair.landing);
@@ -10797,7 +10821,9 @@ function openDrawer(btn) {
       };
 
       const toConnectionPlanError = (planError) => {
-        const baseMessage = planError?.message || "Failed to resolve HID connection plan";
+        const baseMessage = planError?.debugMessage
+          || planError?.message
+          || "Failed to resolve HID connection plan";
         const err = new Error(
           planError?.code
             ? `${planError.code}: ${baseMessage}`
