@@ -11,6 +11,8 @@ const modelByPid = new Map([
   [0x00c0, "viper-v3"],
   [0x00c1, "viper-v3"],
   [0x00c5, "deathadder-v3-hyperspeed"],
+  [0x00de, "viper-v3-pro-se"],
+  [0x00df, "viper-v3-pro-se"],
   [0x00e5, "viper-v4"],
   [0x00e6, "viper-v4"],
 ]);
@@ -88,6 +90,14 @@ function featureCollection(usagePage = 0xff00, usage = 0x01, reportId = 0) {
   };
 }
 
+function outputCollection(usagePage = 0x01, usage = 0x02, reportId = 0) {
+  return {
+    usagePage,
+    usage,
+    outputReports: [{ reportId }],
+  };
+}
+
 {
   const multiCollection = device(0x00e5, "Viper V4", [
     inputCollection(),
@@ -146,7 +156,61 @@ function featureCollection(usagePage = 0xff00, usage = 0x01, reportId = 0) {
   });
 
   assert.equal(result.connectionPlanError, null);
+  assert.equal(result.connectionPlans[0].controlDevice, viperV3);
   assert.equal(result.connectionPlans[0].transportMode, "legacy-v3");
+}
+
+{
+  // Windows/Chrome can hide the feature-report collection while leaving the
+  // primary mouse collection authorized. Keep the handle usable so the protocol
+  // layer (or the local native helper) can still reach the control path.
+  const multiInputOnly = device(0x00df, "Viper V3 Pro SE", [
+    inputCollection(),
+    inputCollection(0x01, 0x06),
+  ]);
+  const result = runtime.resolveRazerConnectionPlans([multiInputOnly], {
+    primaryDevice: multiInputOnly,
+  });
+
+  assert.equal(result.connectionPlanError, null);
+  assert.equal(result.connectionPlans[0].controlDevice, multiInputOnly);
+  assert.equal(result.connectionPlans[0].transportMode, "legacy-v3");
+}
+
+{
+  const inputOnly = device(0x00df, "Viper V3 Pro SE", [inputCollection()]);
+  const control = device(0x00df, "Viper V3 Pro SE", [featureCollection(0x0c)]);
+  const result = runtime.resolveRazerConnectionPlans([inputOnly, control], {
+    primaryDevice: inputOnly,
+  });
+
+  assert.equal(result.connectionPlanError, null);
+  assert.equal(result.connectionPlans[0].controlDevice, control);
+  assert.equal(result.connectionPlans[0].eventDevice, control);
+  assert.equal(result.connectionPlans[0].transportMode, "legacy-v3");
+}
+
+{
+  const featureOnly = device(0x00df, "Viper V3 Pro SE", [featureCollection(0x0c)]);
+  const result = runtime.resolveRazerConnectionPlans([featureOnly], {
+    primaryDevice: featureOnly,
+  });
+
+  assert.equal(result.connectionPlanError, null);
+  assert.equal(result.connectionPlans[0].controlDevice, featureOnly);
+  assert.equal(result.connectionPlans[0].transportMode, "legacy-v3");
+}
+
+{
+  const outputOnly = device(0x00df, "Viper V3 Pro SE", [outputCollection(0x01)]);
+  const result = runtime.resolveRazerConnectionPlans([outputOnly], {
+    primaryDevice: outputOnly,
+  });
+
+  assert.equal(result.connectionPlanError, null);
+  assert.equal(result.connectionPlans[0].controlDevice, outputOnly);
+  assert.equal(result.connectionPlans[0].transportMode, "legacy-v3");
+  assert.equal(result.connectionPlans[0].controlSummary.hasOutputReports, true);
 }
 
 {
@@ -161,7 +225,7 @@ function featureCollection(usagePage = 0xff00, usage = 0x01, reportId = 0) {
   };
   context.navigator.hid.getDevices = async () => [];
 
-  runtime.connect(true).then((result) => {
+  runtime.connect(true).then(async (result) => {
     const viperV4Filters = requestedFilters.filter((filter) => (
       filter.vendorId === 0x1532 && filter.productId === 0x00e5
     ));
@@ -170,6 +234,23 @@ function featureCollection(usagePage = 0xff00, usage = 0x01, reportId = 0) {
     assert.equal(viperV4Filters[0].productId, 0x00e5);
     assert.equal("usagePage" in viperV4Filters[0], false);
     assert.equal(result.connectionPlanError, null);
+
+    let requestCount = 0;
+    const genericHandle = device(0x00df, "Viper V3 Pro SE", [
+      inputCollection(),
+      inputCollection(0x01, 0x06),
+    ]);
+    const controlHandle = device(0x00df, "Viper V3 Pro SE", [featureCollection(0x0c)]);
+    context.navigator.hid.requestDevice = async () => {
+      requestCount += 1;
+      return requestCount === 1 ? [genericHandle] : [controlHandle];
+    };
+
+    const fallback = await runtime.connect(true);
+    assert.equal(requestCount, 2);
+    assert.equal(fallback.device, controlHandle);
+    assert.equal(fallback.detectedType, "razer");
+    assert.equal(fallback.connectionPlanError, null);
     console.log("Razer connection-plan tests passed");
   }).catch((error) => {
     console.error(error);

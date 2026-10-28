@@ -34,7 +34,7 @@ http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${host}`);
     if (!['/api/razer-battery','/api/razer-exchange'].includes(url.pathname)) { res.writeHead(404).end(); return; }
     const productId = Number(url.searchParams.get('productId'));
-    if (![192,193].includes(productId)) { res.writeHead(400).end('Unsupported productId'); return; }
+    if (![192,193,222,223].includes(productId)) { res.writeHead(400).end('Unsupported productId'); return; }
     if (process.platform !== 'win32') { res.writeHead(405).end(); return; }
     let operation;
     if (url.pathname === '/api/razer-exchange') {

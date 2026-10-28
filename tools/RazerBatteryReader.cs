@@ -98,7 +98,7 @@ public static class RazerBatteryReader {
     }
 
     static Result ReadCore(int productId, byte[] request) {
-        if (productId!=0x00c0 && productId!=0x00c1) throw new ArgumentException("Only Viper V3 Pro is supported");
+        if (productId!=0x00c0 && productId!=0x00c1 && productId!=0x00de && productId!=0x00df) throw new ArgumentException("Only Viper V3 Pro / V3 Pro SE is supported");
         Result result = new Result(); result.productId = productId;
         Guid guid; HidD_GetHidGuid(out guid);
         IntPtr set = SetupDiGetClassDevs(ref guid, IntPtr.Zero, IntPtr.Zero, 0x12);
@@ -149,7 +149,7 @@ public static class RazerBatteryReader {
                 } finally { Marshal.FreeHGlobal(detail); }
             }
         } finally { SetupDiDestroyDeviceInfoList(set); }
-        result.error="No readable Viper V3 Pro mouse control interface; close Synapse and reconnect the receiver";
+        result.error="No readable Viper V3 Pro / V3 Pro SE mouse control interface; close Synapse and reconnect the receiver";
         return result;
     }
 }

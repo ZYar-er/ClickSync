@@ -88,6 +88,13 @@
   // Unified retry policy: all commands get the same BUSY retry budget.
   const RAZER_BUSY_RETRY = 10;
   const RAZER_LEGACY_BUSY_RETRY = 32;
+  // A single legacy read must not be allowed to burn the whole 12s handshake
+  // envelope. BUSY retries stay generous because they are cheap (16ms), while
+  // receive timeouts are capped so a sleeping/waking wireless dongle fails fast
+  // and the snapshot can fall back to cached/default values.
+  const RAZER_LEGACY_IO_READ_RETRY = 2;
+  const RAZER_LEGACY_CONNECT_READ_TIMEOUT_MS = 600;
+  const RAZER_LEGACY_CONNECT_SNAPSHOT_BUDGET_MS = 4000;
   // Small backoff reduces transient misalignment loops on some hosts/dongles.
   const RAZER_RETRY_BACKOFF_MS = 16;
   // When only one report-id is available, allow short retry for transient NotAllowedError.
@@ -130,13 +137,20 @@
     DEATHADDER_V3_PRO_WIRELESS_ALT: 0x00c3,
     DEATHADDER_V3_HYPERSPEED_WIRED: 0x00c4,
     DEATHADDER_V3_HYPERSPEED_WIRELESS: 0x00c5,
+    VIPER_V3_PRO_SE_WIRED: 0x00de,
+    VIPER_V3_PRO_SE_WIRELESS: 0x00df,
     VIPER_V4_PRO_WIRED: 0x00e5,
     VIPER_V4_PRO_WIRELESS: 0x00e6,
   });
 
   function isViperV3Pid(pid) {
     const normalized = Number(pid);
-    return normalized === PID.VIPER_V3_PRO_WIRED || normalized === PID.VIPER_V3_PRO_WIRELESS;
+    return normalized === PID.VIPER_V3_PRO_WIRED || normalized === PID.VIPER_V3_PRO_WIRELESS || normalized === PID.VIPER_V3_PRO_SE_WIRED || normalized === PID.VIPER_V3_PRO_SE_WIRELESS;
+  }
+
+  function isViperV3ProSePid(pid) {
+    const normalized = Number(pid);
+    return normalized === PID.VIPER_V3_PRO_SE_WIRED || normalized === PID.VIPER_V3_PRO_SE_WIRELESS;
   }
 
   function isLegacyV3TransportForPid(mode, pid) {
@@ -302,6 +316,7 @@
       dynamicSensitivity: false,
       smartTracking: true,
       sensorAngle: false,
+      maxDpi: 45000,
       lowThresholdTx: null,
       hyperIndicatorTx: null,
       defaultTx: RAZER_CONST.TX_DEFAULT,
@@ -366,6 +381,28 @@
       dynamicSensitivity: true,
       sensorAngle: true,
       hyperIndicatorTx: 0xff,
+    }),
+    buildPidMatrixRow(PID.VIPER_V3_PRO_SE_WIRED, "Razer Viper V3 Pro SE (Wired)", {
+      modelKey: "viper_v3_pro_se",
+      transportRole: TRANSPORT_ROLE.BODY,
+      bodyPid: PID.VIPER_V3_PRO_SE_WIRED,
+      donglePid: PID.VIPER_V3_PRO_SE_WIRELESS,
+      eventReportId: 0x05,
+      dynamicSensitivity: true,
+      sensorAngle: true,
+      smartTracking: true,
+      maxDpi: 35000,
+    }),
+    buildPidMatrixRow(PID.VIPER_V3_PRO_SE_WIRELESS, "Razer Viper V3 Pro SE (Wireless)", {
+      modelKey: "viper_v3_pro_se",
+      transportRole: TRANSPORT_ROLE.DONGLE,
+      bodyPid: PID.VIPER_V3_PRO_SE_WIRED,
+      donglePid: PID.VIPER_V3_PRO_SE_WIRELESS,
+      eventReportId: 0x05,
+      dynamicSensitivity: true,
+      sensorAngle: true,
+      smartTracking: true,
+      maxDpi: 35000,
     }),
     buildPidMatrixRow(PID.DEATHADDER_V3_PRO_WIRED_ALT, "Razer DeathAdder V3 Pro (Wired Alt)", {
       modelKey: "deathadder_v3_pro_alt",
@@ -509,6 +546,7 @@
       dynamicSensitivity: !!matrixRow?.dynamicSensitivity,
       smartTracking: !!matrixRow?.smartTracking,
       sensorAngle: !!matrixRow?.sensorAngle,
+      maxDpi: matrixRow?.maxDpi ?? 45000,
     };
   }
 
@@ -572,6 +610,8 @@
       this._reportId = RAZER_WEBHID_REPORT_ID;
       this._transactionId = 0;
       this._transportMode = RAZER_TRANSPORT_MODE.OFFICIAL;
+      this._hasFeatureReports = false;
+      this._hasOutputReports = false;
     }
 
     setDevice(device, productId = 0, opts = {}) {
@@ -581,12 +621,20 @@
       if (Object.prototype.hasOwnProperty.call(opts || {}, "transportMode")) {
         this._transportMode = normalizeRazerTransportMode(opts.transportMode);
       }
+      this._refreshReportCapabilities();
+      if (this._usesOutputTransport()) {
+        console.debug("[Razer] Control handle has no feature reports; using sendReport/inputreport transport", {
+          productId: this.productId,
+          reportId: this._collectReportIds("output")[0] ?? RAZER_WEBHID_REPORT_ID,
+        });
+      }
       this._reportId = this._collectReportId();
       this._transactionId = 0;
     }
 
     setTransportMode(mode) {
       this._transportMode = normalizeRazerTransportMode(mode);
+      this._refreshReportCapabilities();
       this._reportId = this._collectReportId();
       this._transactionId = 0;
     }
@@ -595,13 +643,68 @@
       return isLegacyV3TransportForPid(this._transportMode, this.productId);
     }
 
+    _refreshReportCapabilities() {
+      this._hasFeatureReports = this._hasReportKind("feature");
+      this._hasOutputReports = this._hasReportKind("output");
+    }
+
+    _hasReportKind(reportKind) {
+      const key = reportKind === "output" ? "outputReports" : "featureReports";
+      const src = this.device?.[key];
+      if (Array.isArray(src) && src.length) return true;
+      const walk = (collections) => {
+        if (!Array.isArray(collections)) return false;
+        for (const collection of collections) {
+          if (Array.isArray(collection?.[key]) && collection[key].length) return true;
+          if (walk(collection?.children)) return true;
+        }
+        return false;
+      };
+      return walk(this.device?.collections);
+    }
+
+    _collectReportIds(reportKind) {
+      const key = reportKind === "output" ? "outputReports" : "featureReports";
+      const ids = [];
+      const seen = new Set();
+      const push = (report) => {
+        const rid = Number(report?.reportId);
+        if (!Number.isFinite(rid)) return;
+        if (seen.has(rid)) return;
+        seen.add(rid);
+        ids.push(rid);
+      };
+      for (const report of (Array.isArray(this.device?.[key]) ? this.device[key] : [])) push(report);
+      const walk = (collections) => {
+        if (!Array.isArray(collections)) return;
+        for (const collection of collections) {
+          for (const report of (Array.isArray(collection?.[key]) ? collection[key] : [])) push(report);
+          walk(collection?.children);
+        }
+      };
+      walk(this.device?.collections);
+      return ids;
+    }
+
+    _usesOutputTransport() {
+      return this._hasOutputReports && !this._hasFeatureReports;
+    }
+
     _requireOpenDevice() {
       if (!this.device) throw new ProtocolError("No HID device assigned", "NO_DEVICE");
       if (!this.device.opened) throw new ProtocolError("HID device is not opened", "NOT_OPEN");
     }
 
     _collectReportId() {
-      // Razer WebHID feature I/O uses reportId 0 across both V3 legacy and V4 official paths.
+      // Prefer the actual report ID advertised by the chosen transport. Many
+      // Razer interfaces still use 0 (no report-id byte), but the SE wireless
+      // mouse HID interface may expose output/input reports with a non-zero id.
+      if (this._usesOutputTransport()) {
+        const outputIds = this._collectReportIds("output");
+        if (outputIds.length) return outputIds[0];
+      }
+      const featureIds = this._collectReportIds("feature");
+      if (featureIds.length) return featureIds[0];
       return RAZER_WEBHID_REPORT_ID;
     }
 
@@ -634,11 +737,16 @@
 
     async _sendFeature(reportId, payload) {
       this._requireOpenDevice();
+      const rid = Number(reportId);
       await this._withTimeout(
-        this.device.sendFeatureReport(Number(reportId), payload),
+        this._usesOutputTransport()
+          ? this.device.sendReport(rid, payload)
+          : this.device.sendFeatureReport(rid, payload),
         this.sendTimeoutMs,
         "IO_WRITE_TIMEOUT",
-        `sendFeatureReport timeout (${this.sendTimeoutMs}ms)`
+        this._usesOutputTransport()
+          ? `sendReport timeout (${this.sendTimeoutMs}ms)`
+          : `sendFeatureReport timeout (${this.sendTimeoutMs}ms)`
       );
     }
 
@@ -653,6 +761,10 @@
       return toDataViewU8(raw);
     }
 
+    /**
+     * Optional native fallback served by tools/serve_local.cjs (loopback only).
+     * Windows/Chrome can authorize the receiver interface but refuse feature I/O.
+     */
     _canUseLocalTransport() {
       const location = typeof window !== "undefined" ? window.location : null;
       return this._usesLegacyV3Transport() && location?.protocol === "http:"
@@ -664,20 +776,72 @@
       const timer = setTimeout(() => controller.abort(), 15000);
       try {
         const response = await fetch(`/api/razer-exchange?productId=${this.productId}`, {
-          method: "POST", headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({packet:Array.from(packet)}), signal:controller.signal,
-          cache:"no-store", credentials:"same-origin",
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ packet: Array.from(packet) }),
+          signal: controller.signal,
+          cache: "no-store",
+          credentials: "same-origin",
         });
         const value = await response.json();
         if (!response.ok || value.ok !== true || value.productId !== this.productId
           || !Array.isArray(value.response) || value.response.length !== RAZER_REPORT_LEN
-          || value.response.some(x => !Number.isInteger(x) || x < 0 || x > 255)) {
+          || value.response.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) {
           throw new Error(value.error || `Native transport HTTP ${response.status}`);
         }
         return new Uint8Array(value.response);
       } catch (err) {
         throw new ProtocolError(String(err?.message || err), "NATIVE_TRANSPORT_FAILED");
-      } finally { clearTimeout(timer); }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    _beginInputResponse(request, timeoutMs) {
+      this._requireOpenDevice();
+      const device = this.device;
+      let cleanup = null;
+      const promise = new Promise((resolve, reject) => {
+        let timer = null;
+        cleanup = () => {
+          if (timer) clearTimeout(timer);
+          if (typeof device.removeEventListener === "function") {
+            device.removeEventListener("inputreport", onInput);
+          }
+        };
+        const onInput = (event) => {
+          try {
+            const raw = toDataViewU8(event?.data);
+            if (raw.byteLength !== RAZER_REPORT_LEN && raw.byteLength !== RAZER_REPORT_LEN + 1) return;
+            const responseBytes = ProtocolCodec.fitReport(raw);
+            const response = ProtocolCodec.parseRazerReport(responseBytes);
+            if (!ProtocolCodec.matchLegacyResponse(request, response)) return;
+            cleanup();
+            resolve(response);
+          } catch {
+            // Ignore unrelated/partial HID input reports.
+          }
+        };
+        if (typeof device.addEventListener !== "function") {
+          reject(new ProtocolError("HID device cannot listen for input reports", "IO_INPUT_UNSUPPORTED"));
+          return;
+        }
+        device.addEventListener("inputreport", onInput);
+        timer = setTimeout(() => {
+          cleanup();
+          reject(new ProtocolError(
+            `inputreport response timeout (${timeoutMs}ms)`,
+            "IO_READ_TIMEOUT",
+            { timeoutMs }
+          ));
+        }, timeoutMs);
+      });
+      return {
+        promise,
+        cancel() {
+          if (cleanup) cleanup();
+        },
+      };
     }
 
     /**
@@ -695,6 +859,9 @@
         const reportId = Number(this._reportId ?? RAZER_WEBHID_REPORT_ID);
 
         const retryBudget = usesLegacyV3 ? RAZER_LEGACY_BUSY_RETRY : RAZER_BUSY_RETRY;
+        const ioReadRetryBudget = usesLegacyV3
+          ? Math.min(retryBudget, Math.max(0, RAZER_LEGACY_IO_READ_RETRY))
+          : retryBudget;
         const waitMs = Number.isFinite(Number(opts.waitMs))
           ? Number(opts.waitMs)
           : getWaitMsForPid(this.productId, this._transportMode);
@@ -705,23 +872,38 @@
         let lastErr = null;
 
         for (let attempt = 0; attempt <= retryBudget; attempt++) {
+          const usesOutputTransport = !this._useNativeTransport && this._usesOutputTransport();
+          const inputRead = usesOutputTransport
+            ? this._beginInputResponse(request, this.readTimeoutMs)
+            : null;
           try {
-            let raw;
+            let response = null;
             if (this._useNativeTransport) {
-              raw = await this._nativeRoundTrip(requestBytes);
+              const raw = await this._nativeRoundTrip(requestBytes);
+              response = ProtocolCodec.parseRazerReport(ProtocolCodec.fitReport(raw));
             } else {
               try {
                 await this._sendFeature(reportId, requestBytes);
                 if (waitMs > 0) await sleep(waitMs);
-                raw = await this._recvFeature(reportId);
+
+                if (usesOutputTransport) {
+                  response = await inputRead.promise;
+                } else {
+                  const raw = await this._recvFeature(reportId);
+                  const responseBytes = ProtocolCodec.fitReport(raw);
+                  response = ProtocolCodec.parseRazerReport(responseBytes);
+                }
               } catch (err) {
-                if (!isPermissionPathError(err) || !this._canUseLocalTransport()) throw err;
-                raw = await this._nativeRoundTrip(requestBytes);
+                inputRead?.cancel();
+                // A handle with neither feature nor output reports cannot carry
+                // Razer commands at all; on the loopback helper that is expected.
+                const noWebHidIo = !this._hasFeatureReports && !this._hasOutputReports;
+                if ((!isPermissionPathError(err) && !noWebHidIo) || !this._canUseLocalTransport()) throw err;
+                const raw = await this._nativeRoundTrip(requestBytes);
                 this._useNativeTransport = true;
+                response = ProtocolCodec.parseRazerReport(ProtocolCodec.fitReport(raw));
               }
             }
-            const responseBytes = ProtocolCodec.fitReport(raw);
-            const response = ProtocolCodec.parseRazerReport(responseBytes);
 
             const responseMatches = usesLegacyV3
               ? ProtocolCodec.matchLegacyResponse(request, response)
@@ -756,16 +938,16 @@
               case REPORT_STATUS.SUCCESS:
               case REPORT_STATUS.SUCCESSFUL:
                 return response;
-              case REPORT_STATUS.NEW_COMMAND:
-                throw new ProtocolError("Razer device returned NEW_COMMAND", "DEVICE_COMMAND_NEW_COMMAND", {
-                  reportId,
-                  response,
-                });
               case REPORT_STATUS.BUSY:
                 throw new ProtocolError("Razer device returned BUSY", "DEVICE_BUSY", {
                   reportId,
                   response,
                   attempts: attempt + 1,
+                });
+              case REPORT_STATUS.NEW_COMMAND:
+                throw new ProtocolError("Razer device returned NEW_COMMAND", "DEVICE_COMMAND_NEW_COMMAND", {
+                  reportId,
+                  response,
                 });
               case REPORT_STATUS.FAIL:
               case REPORT_STATUS.FAILURE:
@@ -790,6 +972,7 @@
                 });
             }
           } catch (err) {
+            inputRead?.cancel();
             lastErr = err;
             const name = String(err?.name || "");
             const msg = String(err?.message || "").toLowerCase();
@@ -824,7 +1007,10 @@
               || isPermissionPathErr
             ) {
               if (RAZER_RETRY_BACKOFF_MS > 0) await sleep(RAZER_RETRY_BACKOFF_MS);
-              if (attempt < retryBudget) continue;
+              const retryLimit = code === "IO_READ_TIMEOUT"
+                ? ioReadRetryBudget
+                : retryBudget;
+              if (attempt < retryLimit) continue;
             }
             throw err;
           }
@@ -1454,11 +1640,12 @@
       return POLLING_V2_DECODE_MAP.get(Number(code)) ?? 1000;
     },
 
-    clampDpi(dpi) {
-      return clampInt(dpi, 100, 45000);
+    clampDpi(dpi, max = 45000) {
+      return clampInt(dpi, 100, max);
     },
 
-    normalizeDpi(prevDpi, patch) {
+    normalizeDpi(prevDpi, patch, max) {
+      const cap = Number.isFinite(Number(max)) && Number(max) > 0 ? Math.trunc(Number(max)) : 45000;
       const prev = isObject(prevDpi) ? prevDpi : { x: 1600, y: 1600 };
       let x = prev.x;
       let y = prev.y;
@@ -1479,25 +1666,26 @@
       if (Object.prototype.hasOwnProperty.call(patch, "dpiY")) y = patch.dpiY;
 
       return {
-        x: TRANSFORMERS.clampDpi(x),
-        y: TRANSFORMERS.clampDpi(y),
+        x: TRANSFORMERS.clampDpi(x, cap),
+        y: TRANSFORMERS.clampDpi(y, cap),
       };
     },
 
-    normalizeDpiStages(input, fallback) {
+    normalizeDpiStages(input, fallback, max) {
+      const cap = Number.isFinite(Number(max)) && Number(max) > 0 ? Math.trunc(Number(max)) : 45000;
       const source = Array.isArray(input) ? input : (Array.isArray(fallback) ? fallback : []);
       const out = [];
 
       for (const item of source) {
         if (out.length >= 5) break;
         if (Number.isFinite(Number(item))) {
-          const v = TRANSFORMERS.clampDpi(item);
+          const v = TRANSFORMERS.clampDpi(item, cap);
           out.push({ x: v, y: v });
           continue;
         }
         if (isObject(item)) {
-          const x = TRANSFORMERS.clampDpi(item.x ?? item.X ?? item.y ?? item.Y ?? 1600);
-          const y = TRANSFORMERS.clampDpi(item.y ?? item.Y ?? item.x ?? item.X ?? x);
+          const x = TRANSFORMERS.clampDpi(item.x ?? item.X ?? item.y ?? item.Y ?? 1600, cap);
+          const y = TRANSFORMERS.clampDpi(item.y ?? item.Y ?? item.x ?? item.X ?? x, cap);
           out.push({ x, y });
           continue;
         }
@@ -1593,12 +1781,23 @@
       return clampInt(v, 1, 3) - 1;
     },
 
-    normalizeSmartTrackingDistances(liftDistance, landingDistance) {
+    normalizeSmartTrackingDistances(liftDistance, landingDistance, prev = null) {
       let lift = clampInt(liftDistance, 2, 26);
       let landing = clampInt(landingDistance, 1, 25);
       if (landing >= lift) {
+        // 联动规则（对齐雷云官方 App）：抬起距离 > 落地距离，差值最小为 1。
+        // - 抬起被拖动到 <= 落地：落地被压到 抬起-1（官方 onLiftChange 行为）
+        // - 落地被拖动到 >= 抬起（或两者同时变化）：抬起被抬到 落地+1（官方 onLandingChange 行为）
+        const prevLift = Number.isFinite(Number(prev?.lift)) ? clampInt(prev.lift, 2, 26) : -1;
+        const prevLanding = Number.isFinite(Number(prev?.landing)) ? clampInt(prev.landing, 1, 25) : -1;
+        const liftChanged = lift !== prevLift;
+        const landingChanged = landing !== prevLanding;
+        if (liftChanged && !landingChanged) {
+          landing = Math.max(1, lift - 1);
+        } else {
         lift = Math.min(26, landing + 1);
         if (landing >= lift) landing = Math.max(1, lift - 1);
+      }
       }
       return { lift, landing };
     },
@@ -1634,7 +1833,7 @@
     },
   });
 
-  function normalizePublicSmartTrackingState(raw = null) {
+  function normalizePublicSmartTrackingState(raw = null, prev = null) {
     const seed = isObject(raw) ? raw : {};
     const mode = TRANSFORMERS.normalizeSmartTrackingMode(
       seed.smartTrackingMode ?? DEFAULT_RAZER_SMART_TRACKING_PUBLIC_STATE.smartTrackingMode
@@ -1644,7 +1843,8 @@
     );
     const dist = TRANSFORMERS.normalizeSmartTrackingDistances(
       seed.smartTrackingLiftDistance ?? DEFAULT_RAZER_SMART_TRACKING_PUBLIC_STATE.smartTrackingLiftDistance,
-      seed.smartTrackingLandingDistance ?? DEFAULT_RAZER_SMART_TRACKING_PUBLIC_STATE.smartTrackingLandingDistance
+      seed.smartTrackingLandingDistance ?? DEFAULT_RAZER_SMART_TRACKING_PUBLIC_STATE.smartTrackingLandingDistance,
+      prev
     );
     return {
       smartTrackingMode: mode,
@@ -1899,18 +2099,27 @@
         requireCapability(caps, "smartTracking", "smartTracking", pid);
         const tx = txForField(pid, "smartTracking");
         const officialSmartTracking = buildOfficialSmartTrackingModelFromPublicState(nextState);
+        const isSe = isViperV3ProSePid(pid);
         const seq = [];
         if (officialSmartTracking.isAsymmetric) {
-          // Firmware 1.12 requires calibration to be armed before the
-          // asymmetric unlock/pair write. Symmetric writes must not arm it.
-          seq.push({ packet: ProtocolCodec.commands.setProximitySensorState(tx, OFFICIAL_PROXIMITY_CLASS_ID, OFFICIAL_PROXIMITY_SENSOR_ID, true) });
+          // V3 Pro SE capture (2026-08): asymmetric mode uses liftMode=0x04 with
+          // height=0x00; distances ride on Set Proximity Sensor Configuration
+          // (0x0b/0x05). Other Viper builds use height=0x01 on firmware 1.12.
+          seq.push({
+            packet: ProtocolCodec.commands.setProximitySensorState(
+              tx,
+              OFFICIAL_PROXIMITY_CLASS_ID,
+              OFFICIAL_PROXIMITY_SENSOR_ID,
+              true
+            ),
+          });
           seq.push({
             packet: ProtocolCodec.commands.setProximitySensorLiftSetting(
               tx,
               OFFICIAL_PROXIMITY_CLASS_ID,
               OFFICIAL_PROXIMITY_SENSOR_ID,
               0x04,
-              0x01
+              isSe ? 0x00 : 0x01
             ),
           });
           seq.push({
@@ -1922,6 +2131,18 @@
             ),
           });
         } else {
+          // SE capture: Synapse arms the sensor before every smart-tracking write,
+          // including symmetric ones. Other builds must not arm on symmetric writes.
+          if (isSe) {
+            seq.push({
+              packet: ProtocolCodec.commands.setProximitySensorState(
+                tx,
+                OFFICIAL_PROXIMITY_CLASS_ID,
+                OFFICIAL_PROXIMITY_SENSOR_ID,
+                true
+              ),
+            });
+          }
           seq.push({
             packet: ProtocolCodec.commands.setProximitySensorLiftSetting(
               tx,
@@ -2057,13 +2278,13 @@
         Object.prototype.hasOwnProperty.call(patch, "dpiX") ||
         Object.prototype.hasOwnProperty.call(patch, "dpiY")
       ) {
-        next.dpi = TRANSFORMERS.normalizeDpi(next.dpi, patch);
+        next.dpi = TRANSFORMERS.normalizeDpi(next.dpi, patch, this.capabilities?.maxDpi);
       }
 
       if (Object.prototype.hasOwnProperty.call(patch, "dpiStages")) {
-        next.dpiStages = TRANSFORMERS.normalizeDpiStages(patch.dpiStages, next.dpiStages);
+        next.dpiStages = TRANSFORMERS.normalizeDpiStages(patch.dpiStages, next.dpiStages, this.capabilities?.maxDpi);
       } else {
-        next.dpiStages = TRANSFORMERS.normalizeDpiStages(next.dpiStages, next.dpiStages);
+        next.dpiStages = TRANSFORMERS.normalizeDpiStages(next.dpiStages, next.dpiStages, this.capabilities?.maxDpi);
       }
 
       if (Object.prototype.hasOwnProperty.call(patch, "activeDpiStageIndex")) {
@@ -2125,7 +2346,11 @@
         if ((hasLift || hasLanding) && !hasSmartTrackingMode) {
           smartTrackingSeed.smartTrackingMode = "asymmetric";
         }
-        Object.assign(next, normalizePublicSmartTrackingState(smartTrackingSeed));
+        const prevSmartTrackingDistances = {
+          lift: next.smartTrackingLiftDistance,
+          landing: next.smartTrackingLandingDistance,
+        };
+        Object.assign(next, normalizePublicSmartTrackingState(smartTrackingSeed, prevSmartTrackingDistances));
       } else if (
         next.smartTrackingMode != null
         || next.smartTrackingLevel != null
@@ -2789,7 +3014,9 @@
       });
     }
     const sourceEcho = ((clampU8(args[2]) << 8) | clampU8(args[1])) & 0xffff;
-    if (sourceEcho !== expectedSourceCode) {
+    // V3 PRO SE: args[2] is profileId (0x01), not sourceCode high byte
+    const isV3ProSeFormat = clampU8(args[2]) === 0x01 && clampU8(args[1]) === (sourceCode & 0xff);
+    if (sourceEcho !== expectedSourceCode && !isV3ProSeFormat) {
       throw new ProtocolError("REP4 source echo mismatch", "REP4_SOURCE_ECHO_MISMATCH", {
         btnId: slot,
         expectedSourceCode,
@@ -2957,9 +3184,10 @@
 
     _setTransportMode(mode) {
       const requested = normalizeRazerTransportMode(mode);
-      this._transportMode = isLegacyV3TransportForPid(requested, this._pid())
+      const pid = this._pid();
+      this._transportMode = isViperV3Pid(pid)
         ? RAZER_TRANSPORT_MODE.LEGACY_V3
-        : RAZER_TRANSPORT_MODE.OFFICIAL;
+        : requested;
       this._driver.setTransportMode(this._transportMode);
       return this._transportMode;
     }
@@ -3002,7 +3230,7 @@
       this._eventDevice = eventDevice || null;
       this._transportPid = this._resolveTransportPid(this._device);
       this._sessionPid = this._resolveSessionPid(this._device);
-      this._transportMode = isLegacyV3TransportForPid(this._transportMode, this._sessionPid)
+      this._transportMode = isViperV3Pid(this._sessionPid)
         ? RAZER_TRANSPORT_MODE.LEGACY_V3
         : RAZER_TRANSPORT_MODE.OFFICIAL;
       this._planner.setProductId(this._sessionPid);
@@ -3077,7 +3305,7 @@
         : [125, 500, 1000];
       return {
         dpiSlotCount: 5,
-        maxDpi: 45000,
+        maxDpi: caps.maxDpi ?? 45000,
         dpiStep: 1,
         pollingRates: pollingRates.slice(0),
         dynamicSensitivity: !!caps.dynamicSensitivity,
@@ -3322,7 +3550,18 @@
       const maxReadAttempts = clampInt(requestedReadRetry, 1, 10);
       const openDelayMs = clampInt(requestedOpenRetryDelayMs, 0, 5000);
       const readDelayMs = clampInt(requestedReadRetryDelayMs, 0, 5000);
-      const driverReadTimeoutMs = clampInt(readTimeoutMs, 250, 10_000);
+      // The V3 Pro SE dongle can take seconds to wake. Bound the first read and
+      // the connect snapshot so the app-level handshake envelope still completes
+      // with cache fallback; other legacy V3 devices keep caller-provided timeouts.
+      const isSeConnectBootstrap = (
+        normalizedReason === "connect"
+        && this._usesLegacyV3Transport()
+        && isViperV3ProSePid(this._pid())
+      );
+      const requestedDriverReadTimeoutMs = clampInt(readTimeoutMs, 250, 10_000);
+      const driverReadTimeoutMs = isSeConnectBootstrap
+        ? Math.max(250, Math.min(requestedDriverReadTimeoutMs, RAZER_LEGACY_CONNECT_READ_TIMEOUT_MS))
+        : requestedDriverReadTimeoutMs;
       const driverSendTimeoutMs = clampInt(
         sendTimeoutMs == null ? Math.max(driverReadTimeoutMs, 1500) : sendTimeoutMs,
         250,
@@ -3356,6 +3595,9 @@
           try {
             const updates = await this._readDeviceStateSnapshot({
               mode: snapshotReadMode,
+              budgetMs: isSeConnectBootstrap
+                ? RAZER_LEGACY_CONNECT_SNAPSHOT_BUDGET_MS
+                : null,
             });
             if (updates && Object.keys(updates).length) {
               this._cfg = Object.assign({}, this._cfg, updates);
@@ -3593,8 +3835,9 @@
       const s = requestedSlot;
 
       const valObj = isObject(value) ? value : null;
-      const nextX = TRANSFORMERS.clampDpi(valObj ? (valObj.x ?? valObj.X ?? valObj.y ?? valObj.Y) : value);
-      const nextY = TRANSFORMERS.clampDpi(valObj ? (valObj.y ?? valObj.Y ?? nextX) : nextX);
+      const dpiMax = this._caps()?.maxDpi ?? 45000;
+      const nextX = TRANSFORMERS.clampDpi(valObj ? (valObj.x ?? valObj.X ?? valObj.y ?? valObj.Y) : value, dpiMax);
+      const nextY = TRANSFORMERS.clampDpi(valObj ? (valObj.y ?? valObj.Y ?? nextX) : nextX, dpiMax);
       next[s - 1] = { x: nextX, y: nextY };
 
       const patch = { dpiStages: next };
@@ -3767,7 +4010,7 @@
       });
     }
 
-    async _readSingleLegacyRep4ButtonMapping(btnId, { strictStability = false } = {}) {
+    async _readSingleLegacyRep4ButtonMapping(btnId, { strictStability = false, deadlineAt = null } = {}) {
       const slot = clampInt(btnId, 1, 6);
       const sourceCode = LEGACY_REP4_SOURCE_CODE_BY_BUTTON_ID[slot];
       if (!Number.isFinite(sourceCode)) {
@@ -3782,6 +4025,14 @@
       let stableHits = 0;
 
       for (let attempt = 1; attempt <= LEGACY_REP4_READ_MAX_ATTEMPTS; attempt++) {
+        if (deadlineAt && Date.now() >= deadlineAt) {
+          lastErr = new ProtocolError("REP4 button read hit snapshot deadline", "REP4_READ_DEADLINE", {
+            btnId: slot,
+            sourceCode: clampU16(sourceCode),
+            attempt,
+          });
+          break;
+        }
         try {
           const readRes = await this._safeQuery(
             ProtocolCodec.commands.getButtonMappingRep4(tx, sourceCode),
@@ -3791,7 +4042,9 @@
                 const args = response?.arguments;
                 if (!(args instanceof Uint8Array) || args.length < 3) return false;
                 const sourceEcho = ((clampU8(args[2]) << 8) | clampU8(args[1])) & 0xffff;
-                return sourceEcho === clampU16(sourceCode);
+                if (sourceEcho === clampU16(sourceCode)) return true;
+                // V3 PRO SE: args[2] is profileId (0x01), not sourceCode high byte
+                return clampU8(args[1]) === (sourceCode & 0xff) && clampU8(args[2]) === 0x01;
               },
             }
           );
@@ -3847,7 +4100,11 @@
       });
     }
 
-    async _readLegacyRep4ButtonMappingsSnapshot({ strictStability = false, skipDeviceRead = false } = {}) {
+    async _readLegacyRep4ButtonMappingsSnapshot({
+      strictStability = false,
+      skipDeviceRead = false,
+      deadlineAt = null,
+    } = {}) {
       this._ensureSupported();
       const cached = Array.isArray(this._cfg?.buttonMappings) && this._cfg.buttonMappings.length
         ? this._cfg.buttonMappings
@@ -3867,7 +4124,10 @@
           DEFAULT_RAZER_BUTTON_SOURCE_BY_BUTTON[slot]
         );
         try {
-          out.push(await this._readSingleLegacyRep4ButtonMapping(slot, { strictStability }));
+          out.push(await this._readSingleLegacyRep4ButtonMapping(slot, {
+            strictStability,
+            deadlineAt,
+          }));
         } catch (err) {
           console.warn("[Razer] REP4 button read failed", { slot, err });
           out.push(fallback);
@@ -3995,7 +4255,9 @@
       const timer = setTimeout(() => controller.abort(), 14000);
       try {
         const response = await fetch(`/api/razer-battery?productId=${this._pid()}`, {
-          signal: controller.signal, cache: "no-store", credentials: "same-origin",
+          signal: controller.signal,
+          cache: "no-store",
+          credentials: "same-origin",
         });
         if (!response.ok) throw new Error(`Local battery helper HTTP ${response.status}`);
         const value = await response.json();
@@ -4010,11 +4272,13 @@
       } catch (err) {
         console.warn("[Razer] Local battery helper unavailable", err);
         return null;
-      } finally { clearTimeout(timer); }
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     // Read battery + charging + idle + low-threshold snapshot.
-    async _readBatterySnapshot() {
+    async _readBatterySnapshot({ deadlineAt = null } = {}) {
       const pid = this._ensureSupported();
       const caps = this._caps();
       if (!caps.battery) {
@@ -4023,7 +4287,8 @@
 
       const tx = txForField(pid, "battery");
       const defaultRawThreshold = TRANSFORMERS.normalizeLowThreshold(
-        this._cfg?.chargeLowThreshold ?? TRANSFORMERS.lowPowerPercentToRaw(this._cfg?.lowPowerThresholdPercent ?? 15)
+        this._cfg?.chargeLowThreshold
+          ?? TRANSFORMERS.lowPowerPercentToRaw(this._cfg?.lowPowerThresholdPercent ?? 15)
       );
       const out = {
         batteryPercent: -1,
@@ -4034,43 +4299,64 @@
       };
       const isLegacyV3 = this._usesLegacyV3Transport();
       let nativeBattery = null;
-      const queryBatteryField = async (label, packet) => {
+      // Wireless devices may be slow to wake; retry battery/charging reads a
+      // couple of times before giving up (other fields keep a single attempt).
+      const BATTERY_READ_RETRIES = 2;
+      const BATTERY_READ_RETRY_DELAY_MS = 80;
+      const queryBatteryField = async (label, packet, extraRetries = 0) => {
+        let lastErr = null;
+        const retryCount = deadlineAt ? 0 : extraRetries;
+        for (let attempt = 0; attempt <= retryCount; attempt++) {
+          if (deadlineAt && Date.now() >= deadlineAt) return null;
         try {
-          return await this._safeQuery(
+            const res = await this._safeQuery(
             packet,
             null,
             isLegacyV3
               ? { swallowPermissionPathError: false, swallowCodes: [] }
               : {}
           );
+            if (res?.arguments) return res;
+            if (attempt < retryCount && BATTERY_READ_RETRY_DELAY_MS > 0) {
+              await sleep(BATTERY_READ_RETRY_DELAY_MS);
+            }
         } catch (err) {
+            lastErr = err;
           if (!isLegacyV3) throw err;
           if (label === "battery" && isPermissionPathError(err)) {
             nativeBattery = await this._readBatteryViaLocalHelper();
             if (nativeBattery) return null;
           }
+            if (attempt < retryCount && BATTERY_READ_RETRY_DELAY_MS > 0) {
+              await sleep(BATTERY_READ_RETRY_DELAY_MS);
+            }
+          }
+        }
+        if (isLegacyV3) {
           console.warn("[Razer] Legacy V3 battery read failed", {
             field: String(label || ""),
             pid,
             transportMode: this._transportMode,
-            code: String(err?.code || ""),
-            message: String(err?.message || err || ""),
-            err,
+            code: String(lastErr?.code || ""),
+            message: String(lastErr?.message || lastErr || ""),
+            lastErr,
           });
-          return null;
         }
+        return null;
       };
 
-      const batteryRes = await queryBatteryField("battery", ProtocolCodec.commands.getBattery(tx));
+      const batteryRes = await queryBatteryField("battery", ProtocolCodec.commands.getBattery(tx), BATTERY_READ_RETRIES);
       if (nativeBattery) return Object.assign(out, nativeBattery);
       if (batteryRes?.arguments) {
         out.batteryPercent = TRANSFORMERS.batteryPercentFromRaw(batteryRes.arguments[1] ?? 0);
       }
 
-      const chargingRes = await queryBatteryField("charging", ProtocolCodec.commands.getCharging(tx));
+      const chargingRes = await queryBatteryField("charging", ProtocolCodec.commands.getCharging(tx), BATTERY_READ_RETRIES);
       if (chargingRes?.arguments) {
         out.batteryIsCharging = !!(chargingRes.arguments[1] ?? 0);
       }
+
+      if (deadlineAt && Date.now() >= deadlineAt) return out;
 
       if (caps.idle) {
         const idleRes = await queryBatteryField("idle", ProtocolCodec.commands.getIdle(tx));
@@ -4125,14 +4411,24 @@
     }
 
     // Read the serialized runtime snapshot used by connect bootstrap and later refreshes.
-    async _readDeviceStateSnapshot({ mode = SNAPSHOT_READ_MODE.REFRESH_FULL } = {}) {
+    async _readDeviceStateSnapshot({ mode = SNAPSHOT_READ_MODE.REFRESH_FULL, budgetMs = null } = {}) {
       const pid = this._ensureSupported();
       const caps = this._caps();
       const tx = txForField(pid, "snapshot");
       const snapshotMode = this._resolveSnapshotReadMode(mode);
       const isConnectFull = snapshotMode === SNAPSHOT_READ_MODE.CONNECT_FULL;
       const isLegacyV3 = this._usesLegacyV3Transport();
-      const readOptionalAdvancedSnapshot = !(isLegacyV3 && isConnectFull && !this._driver._canUseLocalTransport());
+      const isViperV3ProSe = isViperV3ProSePid(pid);
+      // The local native helper can read advanced params even at connect time;
+      // without it legacy V3 keeps the connect-time skip (SE still opts in).
+      const readOptionalAdvancedSnapshot = !(isLegacyV3 && isConnectFull && !this._driver._canUseLocalTransport())
+        || isViperV3ProSe;
+      const snapshotStartedAt = Date.now();
+      const snapshotBudgetMs = clampInt(Number(budgetMs) || 0, 0, 30_000);
+      const hasSnapshotBudget = (reserveMs = 0) => (
+        snapshotBudgetMs <= 0
+        || (Date.now() - snapshotStartedAt) + reserveMs < snapshotBudgetMs
+      );
       const updates = {
         deviceName: PID_NAME[pid] || (this.device?.productName ? String(this.device.productName) : "Razer Mouse"),
         capabilities: this._capabilitiesSnapshot(caps),
@@ -4152,6 +4448,8 @@
         }
       }
 
+      if (!hasSnapshotBudget()) return updates;
+
       if (caps.pollingMode === "v2") {
         const poll = await this._safeQuery(
           isLegacyV3
@@ -4167,6 +4465,8 @@
           updates.pollingHz = TRANSFORMERS.pollingLegacyDecode(poll.arguments[0]);
         }
       }
+
+      if (!hasSnapshotBudget()) return updates;
 
       const parsedDpiStages = await this._readDpiStagesSnapshotWithRetry({
         tx,
@@ -4202,12 +4502,20 @@
         }
       }
 
+      if (!hasSnapshotBudget()) return updates;
+
       if (caps.battery) {
-        const battery = await this._readBatterySnapshot();
+        const battery = await this._readBatterySnapshot({
+          deadlineAt: snapshotBudgetMs > 0
+            ? snapshotStartedAt + snapshotBudgetMs
+            : null,
+        });
         Object.assign(updates, battery);
       }
 
-      if (caps.hyperpollingIndicatorMode && readOptionalAdvancedSnapshot) {
+      if (!hasSnapshotBudget()) return updates;
+
+      if (caps.hyperpollingIndicatorMode && readOptionalAdvancedSnapshot && hasSnapshotBudget()) {
         const txHyper = txForField(pid, "hyperpollingIndicatorMode");
         const hyper = await this._safeQuery(ProtocolCodec.commands.getHyperpollingIndicatorMode(txHyper));
         if (hyper?.arguments) {
@@ -4215,29 +4523,36 @@
         }
       }
 
-      if (caps.dynamicSensitivity && readOptionalAdvancedSnapshot) {
+      if (caps.dynamicSensitivity && readOptionalAdvancedSnapshot && hasSnapshotBudget()) {
         const txDyn = txForField(pid, "dynamicSensitivity");
-        const dynEnabled = await this._safeQuery(ProtocolCodec.commands.getProximitySensorAccelerationState(txDyn));
+        const dynEnabled = await this._safeQuery(
+          ProtocolCodec.commands.getProximitySensorAccelerationState(txDyn)
+        );
         if (dynEnabled?.arguments) {
           updates.dynamicSensitivityEnabled = !!clampU8(dynEnabled.arguments[1] ?? 0);
         }
-        const dynMode = await this._safeQuery(ProtocolCodec.commands.getProximitySensorAccelerationMode(txDyn));
+        const dynMode = await this._safeQuery(
+          ProtocolCodec.commands.getProximitySensorAccelerationMode(txDyn)
+        );
         if (dynMode?.arguments) {
           updates.dynamicSensitivityMode = TRANSFORMERS.normalizeDynamicSensitivityMode(dynMode.arguments[1] ?? 1);
         }
       }
 
-      if (caps.sensorAngle && readOptionalAdvancedSnapshot) {
+      if (caps.sensorAngle && readOptionalAdvancedSnapshot && hasSnapshotBudget()) {
         const txAngle = txForField(pid, "sensorAngle");
-        const angleRes = await this._safeQuery(ProtocolCodec.commands.getSensorAngle(txAngle));
+        const angleRes = await this._safeQuery(
+          ProtocolCodec.commands.getSensorAngle(txAngle)
+        );
         if (angleRes?.arguments) {
+          const angleIndex = 2;
           updates.sensorAngle = TRANSFORMERS.normalizeSensorAngle(
-            TRANSFORMERS.fromInt8Raw(angleRes.arguments[2] ?? 0)
+            TRANSFORMERS.fromInt8Raw(angleRes.arguments[angleIndex] ?? 0)
           );
         }
       }
 
-      if (caps.smartTracking && readOptionalAdvancedSnapshot) {
+      if (caps.smartTracking && readOptionalAdvancedSnapshot && hasSnapshotBudget()) {
         const txTracking = txForField(pid, "smartTracking");
         const officialSmartTracking = Object.assign(
           {},
@@ -4253,6 +4568,7 @@
         );
         if (liftRes?.arguments) {
           const modeSel = clampU8(liftRes.arguments[2] ?? 0x01);
+          // Symmetric=0x01, Asymmetric=0x04 (confirmed via Synapse capture).
           officialSmartTracking.isAsymmetric = modeSel === 0x04;
           if (liftRes.arguments[3] != null) {
             officialSmartTracking.trackingDistance = TRANSFORMERS.smartTrackingLevelToTrackingDistance(
@@ -4270,23 +4586,39 @@
         );
         const proximityConfig = parseOfficialProximitySensorConfiguration(distRes);
         if (proximityConfig) {
+          // Captured format (2026-08, wireless, dataSize=10):
+          //   [classId=0x00, sensorId=0x04, liftRaw, landingRaw, 0, 0, 0, 0, 0, 0]
+          // Some wired builds may echo an extra 0x00 placeholder before the pair:
+          //   [.., 0x00, liftRaw, landingRaw, ..]
+          const parm0 = proximityConfig.parm0;
+          const parm1 = proximityConfig.parm1;
+          const parm2 = proximityConfig.parm2;
+          const hasPlaceholderLayout = parm0 === 0 && parm1 !== 0 && parm2 !== 0;
+          const liftRaw = hasPlaceholderLayout ? parm1 : parm0;
+          const landingRaw = hasPlaceholderLayout ? parm2 : parm1;
           officialSmartTracking.liftOffDistance = officialSmartTrackingDistanceFromRaw(
-            proximityConfig.parm1,
+            liftRaw,
             OFFICIAL_SMART_TRACKING_RAW_DEFAULT.liftOffDistance
           );
           officialSmartTracking.landingDistance = officialSmartTrackingDistanceFromRaw(
-            proximityConfig.parm2,
+            landingRaw,
             OFFICIAL_SMART_TRACKING_RAW_DEFAULT.landingDistance
           );
         }
         Object.assign(updates, buildPublicSmartTrackingStateFromOfficialModel(officialSmartTracking));
       }
 
+      const buttonDeadlineAt = snapshotBudgetMs > 0
+        ? snapshotStartedAt + snapshotBudgetMs
+        : null;
+      if (hasSnapshotBudget()) {
       const buttonMappings = await this._readButtonMappingsSnapshot({
-        skipDeviceRead: isLegacyV3 && isConnectFull,
+          skipDeviceRead: isLegacyV3 && isConnectFull && !isViperV3ProSe,
+          deadlineAt: buttonDeadlineAt,
       });
       if (Array.isArray(buttonMappings) && buttonMappings.length) {
         updates.buttonMappings = buttonMappings;
+      }
       }
 
       // V4 uses official OBM; V3 legacy shares the public model via REP4 codec.
