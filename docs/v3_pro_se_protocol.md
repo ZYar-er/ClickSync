@@ -168,7 +168,8 @@ Same as request, with:
 ### Get Smart Tracking Configuration
 - **Command**: class=0x0b, cmd=0x85, dataSize=0x0a
 - **Arguments**: [classId=0x00, sensorId=0x04]
-- **Response**: [classId, sensorId, ???, liftOffRaw, landingRaw, ...]
+- **Response（2026-10-28 ClickSync 实机确认，无线）**: `[classId=0x00, sensorId=0x04, flag, liftOffRaw, landingRaw, 0, 0, 0, 0, 0]`
+- **flag**: 观察值为 0x01（对称模式）；含义待定，但**不是距离**
 - **liftOff distance**: liftOffRaw + 1
 - **landing distance**: landingRaw + 1
 
@@ -317,7 +318,11 @@ args[6] = quadlet byte 3
 
 - **mode 语义实机确认**：0x01=对称（height=level 0/1/2）、0x04=非对称（height=0，距离由 0x0b/0x05 决定）
 - **0x0b/0x05 写入格式**：`[00 04 liftRaw landingRaw 00 00 00 00 00 00]`，距离=raw+1 mm
-- **SET 回显确认（协议日志 get 方向）**：设备对每条 SET 精确回显（如写 `[00 04 0c 0b ...]` → 回 `[00 04 0c 0b ...]`）；**雷云从不发独立 GET（0x8b/0x85）**，距离值只存 localStorage——ClickSync 是唯一做读回验证的实现，GET 响应布局尚未实机确认（2026-08-17 起读取路径带 `console.debug` 原始响应日志）
+- **SET 回显确认（协议日志 get 方向）**：设备对每条 SET 精确回显（如写 `[00 04 0c 0b ...]` → 回 `[00 04 0c 0b ...]`）；**雷云从不发独立 GET（0x8b/0x85）**，距离值只存 localStorage——ClickSync 是唯一做读回验证的实现。
+- **GET 响应布局实机确认（2026-10-28，ClickSync + 本地原生回退，pid=0x00DF）**：
+  - `0x0b/0x8b` → `00 04 01 01`（modeSel=0x01 对称，level=0x01）
+  - `0x0b/0x85` → `00 04 01 0c 0b 00 00 00 00 00`（flag=0x01，liftRaw=0x0C→13mm，landingRaw=0x0B→12mm）
+  - 注意：响应在 sensorId 之后还有一个 **flag 字节**，距离对位于 args[3]/args[4]；此前把 args[2] 当 liftRaw 会导致读回值整体偏移（表现为 14/13 之类）。
 - **默认值验证**：初始写入 `[0x0c, 0x0b]` = 12/11 raw = **13mm/12mm**——与 ClickSync `DEFAULT_RAZER_SMART_TRACKING_OFFICIAL_MODEL`（liftOff=13, landing=12）完全一致
 - 用户拖动范围：lift 1~25mm、landing 0~24mm（raw 0x01~0x19 / 0x00~0x18）
 - **联动约束（对齐雷云官方 UI）**：se_chunks 确认官方行为——落地滑块 max = 抬起-1（`maxLandingDistance: liftOffDistance - 1`），抬起被拉低到 ≤ 落地时落地压到 抬起-1，落地被拉高到 ≥ 抬起时抬起抬到 落地+1（上限 26）。ClickSync 已实现同款联动（app.js 动态 max + 协议层 prev 感知归一化）

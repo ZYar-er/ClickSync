@@ -1908,6 +1908,16 @@
     for (let i = 0; i <= 8; i++) {
       out[`parm${i}`] = readOfficialResponseArgument(response, i + parmOffset);
     }
+    // Confirmed on Viper V3 Pro SE (2026-10-28): the response echoes classId and
+    // sensorId, then carries an extra flag byte before the distance pair:
+    //   [classId=0x00, sensorId=0x04, flag, liftOffRaw, landingRaw, 0, 0, 0, 0, 0]
+    // Without the echo the pair is the first two bytes.
+    out.liftOffRaw = hasClassSensorEcho
+      ? readOfficialResponseArgument(response, 3)
+      : readOfficialResponseArgument(response, 0);
+    out.landingRaw = hasClassSensorEcho
+      ? readOfficialResponseArgument(response, 4)
+      : readOfficialResponseArgument(response, 1);
     return out;
   }
 
@@ -4586,22 +4596,14 @@
         );
         const proximityConfig = parseOfficialProximitySensorConfiguration(distRes);
         if (proximityConfig) {
-          // Captured format (2026-08, wireless, dataSize=10):
-          //   [classId=0x00, sensorId=0x04, liftRaw, landingRaw, 0, 0, 0, 0, 0, 0]
-          // Some wired builds may echo an extra 0x00 placeholder before the pair:
-          //   [.., 0x00, liftRaw, landingRaw, ..]
-          const parm0 = proximityConfig.parm0;
-          const parm1 = proximityConfig.parm1;
-          const parm2 = proximityConfig.parm2;
-          const hasPlaceholderLayout = parm0 === 0 && parm1 !== 0 && parm2 !== 0;
-          const liftRaw = hasPlaceholderLayout ? parm1 : parm0;
-          const landingRaw = hasPlaceholderLayout ? parm2 : parm1;
+          // Confirmed on SE (2026-10-28): [00 04 flag liftRaw landingRaw 0 x5].
+          // The flag byte is not a distance; the pair is parsed by the codec.
           officialSmartTracking.liftOffDistance = officialSmartTrackingDistanceFromRaw(
-            liftRaw,
+            proximityConfig.liftOffRaw,
             OFFICIAL_SMART_TRACKING_RAW_DEFAULT.liftOffDistance
           );
           officialSmartTracking.landingDistance = officialSmartTrackingDistanceFromRaw(
-            landingRaw,
+            proximityConfig.landingRaw,
             OFFICIAL_SMART_TRACKING_RAW_DEFAULT.landingDistance
           );
         }
@@ -4612,13 +4614,13 @@
         ? snapshotStartedAt + snapshotBudgetMs
         : null;
       if (hasSnapshotBudget()) {
-      const buttonMappings = await this._readButtonMappingsSnapshot({
+        const buttonMappings = await this._readButtonMappingsSnapshot({
           skipDeviceRead: isLegacyV3 && isConnectFull && !isViperV3ProSe,
           deadlineAt: buttonDeadlineAt,
-      });
-      if (Array.isArray(buttonMappings) && buttonMappings.length) {
-        updates.buttonMappings = buttonMappings;
-      }
+        });
+        if (Array.isArray(buttonMappings) && buttonMappings.length) {
+          updates.buttonMappings = buttonMappings;
+        }
       }
 
       // V4 uses official OBM; V3 legacy shares the public model via REP4 codec.
