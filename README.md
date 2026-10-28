@@ -38,7 +38,7 @@ Click Sync 是一个基于 WebHID 的多品牌鼠标网页驱动控制台，目�
 
 目前支持的品牌型号包括：
 
-- 雷蛇（毒蝰 V3 Pro、毒蝰 V4 Pro。请退出雷云驱动使用）
+- 雷蛇（毒蝰 V3 Pro、毒蝰 V3 Pro SE、毒蝰 V4 Pro。请退出雷云驱动使用）
 - 罗技（GPW3、GPW4 朱雀、GPW4 鹰眼、小狗、GPW5 雪豹）
 - 雷柏（雷柏二代 54L15 的 3950 系列鼠标）
 - ATK（54L15 的 3950 系列鼠标）
@@ -57,7 +57,7 @@ Click Sync 是一个基于 WebHID 的多品牌鼠标网页驱动控制台，目�
 
 | 设备类型 | 主要识别条件 |
 |---|---|
-| Razer(雷蛇) | `vendorId=0x1532` 且 `productId` 在支持列表内（`0x00C0`-`0x00C5`） |
+| Razer(雷蛇) | `vendorId=0x1532` 且 `productId` 在支持列表内（`0x00B3`、`0x00B6`-`0x00C5`、`0x00DE`/`0x00DF`、`0x00E5`/`0x00E6`） |
 | Logitech(罗技) | `vendorId=0x046D` 且存在 `usagePage=0xFF00`（`usage=0x01/0x02` 或 vendor collection） |
 | Rapoo(雷柏) | `vendorId=0x24AE` 且存在 `usagePage=0xFF00`，`usage=14/15` |
 | ATK | `vendorId in {0x373B,0x3710}` 且存在 `usagePage=0xFF02`,`usage=0x0002` |
@@ -236,7 +236,7 @@ Supported brands in the current code: `Razer`, `Logitech`, `Rapoo`, `ATK`, `Ninj
 
 Currently supported brands and models include:
 
-- Razer (Viper V3 Pro, Viper V4 Pro. Please exit Razer Synapse)
+- Razer (Viper V3 Pro, Viper V3 Pro SE, Viper V4 Pro. Please exit Razer Synapse)
 - Logitech (PRO X SUPERLIGHT 2, PRO 2 LIGHTSPEED, PRO X SUPERLIGHT 2 DEX, PRO X SUPERLIGHT 2C, PRO X2 SUPERSTRIKE)
 - Rapoo (2nd-gen 54L15 3950-series mice)
 - ATK (54L15 3950-series mice)
@@ -255,7 +255,7 @@ Device recognition logic is located in `src/core/device_runtime.js`, matched thr
 
 | Device Type | Main Recognition Criteria |
 |---|---|
-| Razer | `vendorId=0x1532` and `productId` in supported list (`0x00C0`-`0x00C5`) |
+| Razer | `vendorId=0x1532` and `productId` in supported list (`0x00B3`, `0x00B6`-`0x00C5`, `0x00DE`/`0x00DF`, `0x00E5`/`0x00E6`) |
 | Logitech | `vendorId=0x046D` and exists `usagePage=0xFF00` (`usage=0x01/0x02` or vendor collection) |
 | Rapoo | `vendorId=0x24AE` and exists `usagePage=0xFF00`, `usage=14/15` |
 | ATK | `vendorId in {0x373B,0x3710}` and exists `usagePage=0xFF02`, `usage=0x0002` |
@@ -399,14 +399,14 @@ When providing feedback, please include:
 This project is licensed under the `GNU General Public License v2.0`. See [LICENSE](LICENSE) for details.
 
 
-### Windows：毒蝰 V3 Pro 本地 HID 回退
+### Windows：毒蝰 V3 Pro / V3 Pro SE 本地 HID 回退
 
-部分 Windows/Chrome 组合只授权接收器的输入接口，按键事件可读，但电量、DPI 等控制查询报 `NotAllowedError: Failed to write the feature report`。对于毒蝰 V3 Pro（`1532:00c0/00c1`），可安装 Node.js 后运行仓库根目录的 `Start-ClickSync.cmd`，再用 Chrome/Edge 打开 `http://localhost:8765/index.html`。请完全退出雷云，保持服务窗口打开；关闭窗口即可停止本地服务。
+部分 Windows/Chrome 组合只授权接收器的输入接口，按键事件可读，但电量、DPI 等控制查询报 `NotAllowedError: Failed to write the feature report`。对于毒蝰 V3 Pro（`1532:00c0/00c1`）与毒蝰 V3 Pro SE（`1532:00de/00df`），可安装 Node.js 后运行仓库根目录的 `Start-ClickSync.cmd`，再用 Chrome/Edge 打开 `http://localhost:8765/index.html`。请完全退出雷云，保持服务窗口打开；关闭窗口即可停止本地服务。
 
 本地页面在 WebHID 控制访问被拒绝时，回退到 Windows 自带 HID API。该服务仅监听回环地址，校验 Host/Origin、设备 PID 和配置命令白名单；使用单个读取进程复用已编译的辅助代码，避免重复编译导致握手超时。它不会安装驱动、注册开机自启或修改 PowerShell 执行策略。公开静态站点不会调用这个本机服务，其他型号仍走原 WebHID 路径。
 
-### Windows: local HID fallback for Viper V3 Pro
+### Windows: local HID fallback for Viper V3 Pro / V3 Pro SE
 
-If Windows/Chrome authorizes only the receiver input interface, button events may work while control queries fail with `NotAllowedError: Failed to write the feature report`. For Viper V3 Pro (`1532:00c0/00c1`), install Node.js, run `Start-ClickSync.cmd`, and open `http://localhost:8765/index.html` in Chrome/Edge after fully quitting Synapse. Keep the server window open; close it to stop.
+If Windows/Chrome authorizes only the receiver input interface, button events may work while control queries fail with `NotAllowedError: Failed to write the feature report`. For Viper V3 Pro (`1532:00c0/00c1`) and Viper V3 Pro SE (`1532:00de/00df`), install Node.js, run `Start-ClickSync.cmd`, and open `http://localhost:8765/index.html` in Chrome/Edge after fully quitting Synapse. Keep the server window open; close it to stop.
 
 When WebHID control access is denied, the local page uses the Windows HID API through a loopback-only server with Host/Origin, PID, packet and command validation. A single worker compiles the helper once to keep bootstrap within the existing handshake deadline. No driver installation, autostart or PowerShell execution-policy change is needed. The public static site does not call this local service; other models retain their existing WebHID path.
